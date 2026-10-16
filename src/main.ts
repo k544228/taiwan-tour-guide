@@ -174,8 +174,9 @@ async function onFind(cat: Category) {
     setStatus(() => t().searching);
     try {
       places = await searchPlaces(pos.coords.latitude, pos.coords.longitude, Number(els.radius.value) * 1000, cat);
-    } catch {
-      setStatus(() => t().searchFail);
+    } catch (e) {
+      const why = e instanceof Error && e.message ? ` (${e.message})` : '';
+      setStatus(() => `${t().tab[cat]}：${t().searchFail}${why}`);
       return;
     }
     renderList();
