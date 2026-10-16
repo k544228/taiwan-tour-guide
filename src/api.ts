@@ -71,7 +71,7 @@ async function queryOsm(q: string): Promise<OsmEl[]> {
         method: 'POST',
         headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
         body: 'data=' + encodeURIComponent(q),
-        signal: AbortSignal.timeout(30000),
+        signal: AbortSignal.timeout(20000),
       });
       if (!res.ok) throw new Error('HTTP ' + res.status);
       const json = (await res.json()) as { elements?: OsmEl[] };
@@ -113,10 +113,6 @@ async function wikiGeo(lat: number, lon: number, r: number): Promise<Place[]> {
 
 export type Category = 'sight' | 'food' | 'fun';
 
-const RE_KTV = /KTV|卡拉OK|錢櫃|好樂迪/i;
-const RE_BOARD = /桌遊|桌游|board ?game/i;
-const RE_MJ = /麻將|麻雀|mahjong/i;
-
 function foodKind(t: Tags): string {
   return t['amenity'] === 'fast_food' ? 'fast_food' : t['amenity'] === 'food_court' ? 'food_court' : 'restaurant';
 }
@@ -128,10 +124,6 @@ function funKind(t: Tags): string {
   if (t['leisure'] === 'bowling_alley') return 'bowling';
   if (t['leisure'] === 'amusement_arcade' || t['leisure'] === 'adult_gaming_centre') return 'arcade';
   if (t['amenity'] === 'cinema') return 'cinema';
-  const n = t['name'] ?? '';
-  if (RE_MJ.test(n)) return 'mahjong';
-  if (RE_BOARD.test(n)) return 'boardgame';
-  if (RE_KTV.test(n)) return 'ktv';
   return 'other';
 }
 
@@ -153,7 +145,7 @@ function toSimple(els: OsmEl[], lat: number, lon: number, kind: (t: Tags) => str
     const name = t?.['name'];
     const la = e.lat ?? e.center?.lat;
     const lo = e.lon ?? e.center?.lon;
-    if (!t || !name || la === undefined || lo === undefined || out.some((o) => o.id === `${e.type}/${e.id}`)) continue;
+    if (!t || !name || la === undefined || lo === undefined) continue;
     const zh = t['name:zh'] ?? name;
     out.push({
       id: `${e.type}/${e.id}`,
@@ -166,18 +158,14 @@ function toSimple(els: OsmEl[], lat: number, lon: number, kind: (t: Tags) => str
 
 async function searchSimple(cat: 'food' | 'fun', lat: number, lon: number, r: number): Promise<Place[]> {
   const a = `(around:${Math.round(r)},${lat.toFixed(6)},${lon.toFixed(6)})`;
-  const run = (body: string) => queryOsm(`[out:json][timeout:25];(${body});out center 300;`);
-  if (cat === 'food') return toSimple(await run(`nwr${a}["amenity"~"^(restaurant|fast_food|food_court)$"]["name"];`), lat, lon, foodKind);
-  // The name-keyword query is the slow one, so it runs separately: if it fails, the tag-based results still show.
-  const byTag = run(
-    `nwr${a}["amenity"~"^(karaoke_box|cinema)$"]["name"];` +
-      `nwr${a}["leisure"~"^(amusement_arcade|adult_gaming_centre|bowling_alley|escape_game)$"]["name"];` +
-      `nwr${a}["cafe"="board_game"]["name"];`,
-  );
-  const byName = run(`nwr${a}["name"~"KTV|卡拉OK|錢櫃|好樂迪|桌遊|桌游|麻將|麻雀|Mahjong|Board ?Game",i];`);
-  const results = await Promise.allSettled([byTag, byName]);
-  if (results.every((x) => x.status === 'rejected')) throw (results[0] as PromiseRejectedResult).reason;
-  return toSimple(results.flatMap((x) => (x.status === 'fulfilled' ? x.value : [])), lat, lon, funKind);
+  const body =
+    cat === 'food'
+      ? `nwr["amenity"~"^(restaurant|fast_food|food_court)$"]["name"]${a};`
+      : `nwr["amenity"~"^(karaoke_box|cinema)$"]["name"]${a};` +
+        `nwr["leisure"~"^(amusement_arcade|adult_gaming_centre|bowling_alley|escape_game)$"]["name"]${a};` +
+        `nwr["cafe"="board_game"]["name"]${a};`;
+  const els = await queryOsm(`[out:json][timeout:25];(${body});out center 300;`);
+  return toSimple(els, lat, lon, cat === 'food' ? foodKind : funKind);
 }
 
 export async function searchPlaces(lat: number, lon: number, r: number, cat: Category = 'sight'): Promise<Place[]> {
