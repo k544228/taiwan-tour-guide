@@ -9,6 +9,8 @@ export interface Place {
   kind: string;
   wiki?: { lang: string; title: string };
   wikidata?: string;
+  /** Present only for restaurants / entertainment (no Wikipedia involved). */
+  info?: { cuisine?: string; address?: string; hours?: string; phone?: string; website?: string };
 }
 export interface Intro { extract: string; url: string; translatedFrom: 'zh' | 'en' | null }
 
@@ -61,14 +63,7 @@ function toPlaces(els: OsmEl[], lat: number, lon: number): Place[] {
   return out.sort((a, b) => a.dist - b.dist).slice(0, 40);
 }
 
-async function overpass(lat: number, lon: number, r: number): Promise<Place[]> {
-  const a = `(around:${Math.round(r)},${lat.toFixed(6)},${lon.toFixed(6)})`;
-  const q =
-    `[out:json][timeout:25];(` +
-    `nwr["tourism"~"^(${TOURISM.join('|')})$"]["name"]${a};` +
-    `nwr["historic"]["historic"!~"^(wayside_shrine|wayside_cross|boundary_stone|milestone|memorial)$"]["name"]${a};` +
-    `nwr["amenity"="place_of_worship"]["name"]["wikidata"]${a};` +
-    `);out center 100;`;
+async function queryOsm(q: string): Promise<OsmEl[]> {
   let lastErr: unknown = new Error('no endpoint');
   for (const ep of OVERPASS) {
     try {
@@ -80,12 +75,23 @@ async function overpass(lat: number, lon: number, r: number): Promise<Place[]> {
       });
       if (!res.ok) throw new Error('HTTP ' + res.status);
       const json = (await res.json()) as { elements?: OsmEl[] };
-      return toPlaces(json.elements ?? [], lat, lon);
+      return json.elements ?? [];
     } catch (e) {
       lastErr = e;
     }
   }
   throw lastErr;
+}
+
+async function overpass(lat: number, lon: number, r: number): Promise<Place[]> {
+  const a = `(around:${Math.round(r)},${lat.toFixed(6)},${lon.toFixed(6)})`;
+  const q =
+    `[out:json][timeout:25];(` +
+    `nwr["tourism"~"^(${TOURISM.join('|')})$"]["name"]${a};` +
+    `nwr["historic"]["historic"!~"^(wayside_shrine|wayside_cross|boundary_stone|milestone|memorial)$"]["name"]${a};` +
+    `nwr["amenity"="place_of_worship"]["name"]["wikidata"]${a};` +
+    `);out center 100;`;
+  return toPlaces(await queryOsm(q), lat, lon);
 }
 
 async function wikiGeo(lat: number, lon: number, r: number): Promise<Place[]> {
@@ -104,7 +110,75 @@ async function wikiGeo(lat: number, lon: number, r: number): Promise<Place[]> {
 }
 
 /** OpenStreetMap first; Wikipedia GeoSearch only if OpenStreetMap servers fail. */
-export async function searchPlaces(lat: number, lon: number, r: number): Promise<Place[]> {
+
+export type Category = 'sight' | 'food' | 'fun';
+
+const RE_KTV = /KTV|卡拉OK|錢櫃|好樂迪/i;
+const RE_BOARD = /桌遊|桌游|board ?game/i;
+const RE_MJ = /麻將|麻雀|mahjong/i;
+
+function foodKind(t: Tags): string {
+  return t['amenity'] === 'fast_food' ? 'fast_food' : t['amenity'] === 'food_court' ? 'food_court' : 'restaurant';
+}
+
+function funKind(t: Tags): string {
+  if (t['amenity'] === 'karaoke_box') return 'ktv';
+  if (t['cafe'] === 'board_game') return 'boardgame';
+  if (t['leisure'] === 'escape_game') return 'escape';
+  if (t['leisure'] === 'bowling_alley') return 'bowling';
+  if (t['leisure'] === 'amusement_arcade' || t['leisure'] === 'adult_gaming_centre') return 'arcade';
+  if (t['amenity'] === 'cinema') return 'cinema';
+  const n = t['name'] ?? '';
+  if (RE_MJ.test(n)) return 'mahjong';
+  if (RE_BOARD.test(n)) return 'boardgame';
+  if (RE_KTV.test(n)) return 'ktv';
+  return 'other';
+}
+
+function infoOf(t: Tags): NonNullable<Place['info']> {
+  const addr = t['addr:full'] ?? [t['addr:city'], t['addr:district'], t['addr:street'], t['addr:housenumber']].filter(Boolean).join('');
+  const site = t['website'] ?? t['contact:website'];
+  return {
+    cuisine: t['cuisine'], address: addr || undefined, hours: t['opening_hours'],
+    phone: t['phone'] ?? t['contact:phone'],
+    website: site && /^https?:\/\//i.test(site) ? site : undefined, // only http(s) links are ever shown
+  };
+}
+
+/** Restaurants / entertainment: every named match is kept (chain branches included), nearest 40 shown. */
+function toSimple(els: OsmEl[], lat: number, lon: number, kind: (t: Tags) => string): Place[] {
+  const out: Place[] = [];
+  for (const e of els) {
+    const t = e.tags;
+    const name = t?.['name'];
+    const la = e.lat ?? e.center?.lat;
+    const lo = e.lon ?? e.center?.lon;
+    if (!t || !name || la === undefined || lo === undefined) continue;
+    const zh = t['name:zh'] ?? name;
+    out.push({
+      id: `${e.type}/${e.id}`,
+      names: { tw: t['name:zh-Hant'] ?? zh, cn: t['name:zh-Hans'] ?? zh, en: t['name:en'] ?? name },
+      lat: la, lon: lo, dist: haversine(lat, lon, la, lo), kind: kind(t), info: infoOf(t),
+    });
+  }
+  return out.sort((a, b) => a.dist - b.dist).slice(0, 40);
+}
+
+async function searchSimple(cat: 'food' | 'fun', lat: number, lon: number, r: number): Promise<Place[]> {
+  const a = `(around:${Math.round(r)},${lat.toFixed(6)},${lon.toFixed(6)})`;
+  const body =
+    cat === 'food'
+      ? `nwr["amenity"~"^(restaurant|fast_food|food_court)$"]["name"]${a};`
+      : `nwr["amenity"~"^(karaoke_box|cinema)$"]["name"]${a};` +
+        `nwr["leisure"~"^(amusement_arcade|adult_gaming_centre|bowling_alley|escape_game)$"]["name"]${a};` +
+        `nwr["cafe"="board_game"]["name"]${a};` +
+        `nwr["name"~"KTV|卡拉OK|錢櫃|好樂迪|桌遊|桌游|麻將|麻雀|Mahjong|Board ?Game",i]${a};`;
+  const els = await queryOsm(`[out:json][timeout:25];(${body});out center 300;`);
+  return toSimple(els, lat, lon, cat === 'food' ? foodKind : funKind);
+}
+
+export async function searchPlaces(lat: number, lon: number, r: number, cat: Category = 'sight'): Promise<Place[]> {
+  if (cat !== 'sight') return searchSimple(cat, lat, lon, r);
   try {
     return await overpass(lat, lon, r);
   } catch {

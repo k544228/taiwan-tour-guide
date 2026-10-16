@@ -17,7 +17,11 @@
           <span id="radius-label"></span>: <output id="radius-out">3</output> km
           <input id="radius" type="range" min="0.5" max="10" step="0.5" value="3" />
         </label>
-        <button id="find" type="button"></button>
+        <div class="tabs">
+          <button id="tab-sight" type="button" aria-pressed="false"></button>
+          <button id="tab-food" type="button" aria-pressed="false"></button>
+          <button id="tab-fun" type="button" aria-pressed="false"></button>
+        </div>
       </section>
       <p id="status" role="status"></p>
       <ul id="list"></ul>

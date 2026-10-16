@@ -7,7 +7,10 @@ h1 { font-size: 1.3rem; margin: 0; }
 select, button, .actions a { font: inherit; padding: 8px 12px; border: 1px solid var(--line); border-radius: 8px; background: transparent; color: inherit; cursor: pointer; text-decoration: none; }
 .controls { display: grid; gap: 12px; margin: 16px 0; }
 .controls input { width: 100%; }
-#find { background: var(--accent); color: #fff; border-color: var(--accent); padding: 14px; font-weight: 600; }
+.tabs { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; }
+.tabs button { padding: 14px 8px; font-weight: 600; }
+.tabs button[aria-pressed="true"] { background: var(--accent); color: #fff; border-color: var(--accent); }
+#d-text { white-space: pre-line; }
 button:disabled { opacity: .5; cursor: not-allowed; }
 #list { list-style: none; padding: 0; margin: 0; display: grid; gap: 8px; }
 #list button { width: 100%; text-align: left; display: flex; flex-direction: column; }

@@ -1,5 +1,5 @@
 import { LANGS, LANG_LABEL, SPEECH_LANG, T, fmtDist, type Lang } from './i18n';
-import { searchPlaces, fetchIntro, QuotaError, type Place } from './api';
+import { searchPlaces, fetchIntro, QuotaError, type Category, type Place } from './api';
 
 function $<E extends HTMLElement = HTMLElement>(id: string): E {
   const el = document.getElementById(id);
@@ -8,7 +8,7 @@ function $<E extends HTMLElement = HTMLElement>(id: string): E {
 }
 const els = {
   title: $('title'), lang: $<HTMLSelectElement>('lang'), radiusLabel: $('radius-label'),
-  radius: $<HTMLInputElement>('radius'), radiusOut: $('radius-out'), find: $<HTMLButtonElement>('find'),
+  radius: $<HTMLInputElement>('radius'), radiusOut: $('radius-out'), tabs: { sight: $<HTMLButtonElement>('tab-sight'), food: $<HTMLButtonElement>('tab-food'), fun: $<HTMLButtonElement>('tab-fun') },
   status: $('status'), list: $('list'), detail: $('detail'), dName: $('d-name'), dMeta: $('d-meta'), dText: $('d-text'),
   speak: $<HTMLButtonElement>('speak'), stop: $<HTMLButtonElement>('stop'),
   nav: $<HTMLAnchorElement>('nav'), src: $<HTMLAnchorElement>('src'), credits: $('credits'),
@@ -31,6 +31,8 @@ let places: Place[] = [];
 let selected: Place | null = null;
 let narration = '';
 let detailId = 0;
+let category: Category | null = null;
+const catOrder: Category[] = ['sight', 'food', 'fun'];
 let statusFn: () => string = () => '';
 const hasSpeech = 'speechSynthesis' in window && typeof SpeechSynthesisUtterance !== 'undefined';
 const t = () => T[lang];
@@ -75,6 +77,22 @@ function changeSpeed(d: number) {
   if (hasSpeech && speechSynthesis.speaking) speakFrom(cur);
 }
 
+function setBusy(busy: boolean) {
+  for (const c of catOrder) {
+    els.tabs[c].disabled = busy;
+    els.tabs[c].setAttribute('aria-pressed', String(c === category));
+  }
+}
+
+function infoLines(i: NonNullable<Place['info']>): string[] {
+  const L = t().lab;
+  const cu = (i.cuisine ?? '').split(';').map((c) => t().cuisine[c.trim()]).filter(Boolean).join(lang === 'en' ? ', ' : '、');
+  return [
+    cu && `${L.cuisine}: ${cu}`, i.address && `${L.address}: ${i.address}`, i.hours && `${L.hours}: ${i.hours}`,
+    i.phone && `${L.phone}: ${i.phone}`, i.website && `${L.website}: ${i.website}`,
+  ].filter((x): x is string => Boolean(x));
+}
+
 function getPosition(): Promise<GeolocationPosition> {
   return new Promise((resolve, reject) => {
     if (!('geolocation' in navigator)) { reject(new Error('unsupported')); return; }
@@ -113,6 +131,11 @@ async function showDetail(p: Place) {
   els.src.hidden = true;
   els.note.hidden = true;
   els.detail.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+  els.speak.hidden = els.stop.hidden = els.speedBox.hidden = p.info !== undefined || !hasSpeech;
+  if (p.info) {
+    els.dText.textContent = infoLines(p.info).join('\n') || s.noInfo;
+    return;
+  }
   try {
     const intro = await fetchIntro(p, lang);
     if (my !== detailId) return;
@@ -128,8 +151,9 @@ async function showDetail(p: Place) {
   }
 }
 
-async function onFind() {
-  els.find.disabled = true;
+async function onFind(cat: Category) {
+  category = cat;
+  setBusy(true);
   stopSpeak();
   detailId++;
   selected = null;
@@ -149,16 +173,16 @@ async function onFind() {
     }
     setStatus(() => t().searching);
     try {
-      places = await searchPlaces(pos.coords.latitude, pos.coords.longitude, Number(els.radius.value) * 1000);
+      places = await searchPlaces(pos.coords.latitude, pos.coords.longitude, Number(els.radius.value) * 1000, cat);
     } catch {
       setStatus(() => t().searchFail);
       return;
     }
     renderList();
     const n = places.length;
-    setStatus(() => (n ? t().found(n) : t().none));
+    setStatus(() => (n ? (cat === 'sight' ? t().found(n) : t().foundSimple(n)) : t().none));
   } finally {
-    els.find.disabled = false;
+    setBusy(false);
   }
 }
 
@@ -168,7 +192,7 @@ function applyLang() {
   document.title = s.title;
   els.title.textContent = s.title;
   els.radiusLabel.textContent = s.radius;
-  els.find.textContent = s.find;
+  for (const c of catOrder) els.tabs[c].textContent = s.tab[c];
   els.speak.textContent = s.speak;
   els.stop.textContent = s.stop;
   els.nav.textContent = s.navigate;
@@ -189,12 +213,12 @@ els.lang.addEventListener('change', () => {
   applyLang();
 });
 els.radius.addEventListener('input', () => { els.radiusOut.textContent = els.radius.value; });
-els.find.addEventListener('click', () => void onFind());
+for (const c of catOrder) els.tabs[c].addEventListener('click', () => void onFind(c));
 els.speak.addEventListener('click', speak);
 els.stop.addEventListener('click', stopSpeak);
 els.slower.addEventListener('click', () => changeSpeed(-1));
 els.faster.addEventListener('click', () => changeSpeed(1));
 els.speak.hidden = els.stop.hidden = els.speedBox.hidden = !hasSpeech;
 updateSpeedUi();
-statusFn = () => t().hint;
+statusFn = () => '';
 applyLang();
