@@ -1,5 +1,5 @@
 import { LANGS, LANG_LABEL, SPEECH_LANG, T, fmtDist, type Lang } from './i18n';
-import { searchPlaces, fetchIntro, type Place } from './api';
+import { searchPlaces, fetchIntro, QuotaError, type Place } from './api';
 
 function $<E extends HTMLElement = HTMLElement>(id: string): E {
   const el = document.getElementById(id);
@@ -12,6 +12,8 @@ const els = {
   status: $('status'), list: $('list'), detail: $('detail'), dName: $('d-name'), dMeta: $('d-meta'), dText: $('d-text'),
   speak: $<HTMLButtonElement>('speak'), stop: $<HTMLButtonElement>('stop'),
   nav: $<HTMLAnchorElement>('nav'), src: $<HTMLAnchorElement>('src'), credits: $('credits'),
+  note: $('d-note'), speedBox: $('speed-box'), speedLabel: $('speed-label'), speedOut: $('speed-out'),
+  slower: $<HTMLButtonElement>('slower'), faster: $<HTMLButtonElement>('faster'),
 };
 
 function initialLang(): Lang {
@@ -36,15 +38,41 @@ const placeName = (p: Place) => (lang === 'en' ? p.names.en : lang === 'zh-CN' ?
 const setStatus = (fn: () => string) => { statusFn = fn; els.status.textContent = fn(); };
 
 function stopSpeak() { if (hasSpeech) speechSynthesis.cancel(); }
-function speak() {
-  if (!hasSpeech || !narration) return;
+const SPEEDS = [1, 1.5, 2, 3, 4, 5];
+let speedIdx = 0;
+let parts: string[] = [];
+let cur = 0;
+try {
+  const i = SPEEDS.indexOf(Number(localStorage.getItem('speed')));
+  if (i >= 0) speedIdx = i;
+} catch { /* storage unavailable */ }
+
+function updateSpeedUi() {
+  els.speedOut.textContent = `${SPEEDS[speedIdx]}×`;
+  els.slower.disabled = speedIdx === 0;
+  els.faster.disabled = speedIdx === SPEEDS.length - 1;
+}
+function speakFrom(i: number) {
   speechSynthesis.cancel();
-  // Split into sentences: long single utterances get cut off in some browsers.
-  for (const part of narration.match(/[^。！？.!?]+[。！？.!?]*/g) ?? [narration]) {
+  parts.slice(i).forEach((part, k) => {
     const u = new SpeechSynthesisUtterance(part);
     u.lang = SPEECH_LANG[lang];
+    u.rate = SPEEDS[speedIdx] ?? 1;
+    u.onstart = () => { cur = i + k; };
     speechSynthesis.speak(u);
-  }
+  });
+}
+function speak() {
+  if (!hasSpeech || !narration) return;
+  // Split into sentences: long single utterances get cut off in some browsers.
+  parts = narration.match(/[^。！？.!?]+[。！？.!?]*/g) ?? [narration];
+  speakFrom(0);
+}
+function changeSpeed(d: number) {
+  speedIdx = Math.min(SPEEDS.length - 1, Math.max(0, speedIdx + d));
+  try { localStorage.setItem('speed', String(SPEEDS[speedIdx])); } catch { /* ignore */ }
+  updateSpeedUi();
+  if (hasSpeech && speechSynthesis.speaking) speakFrom(cur);
 }
 
 function getPosition(): Promise<GeolocationPosition> {
@@ -83,6 +111,7 @@ async function showDetail(p: Place) {
   els.speak.disabled = true;
   els.nav.href = `https://www.google.com/maps/dir/?api=1&destination=${p.lat},${p.lon}`;
   els.src.hidden = true;
+  els.note.hidden = true;
   els.detail.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
   try {
     const intro = await fetchIntro(p, lang);
@@ -92,9 +121,10 @@ async function showDetail(p: Place) {
     narration = `${s.intro(name, fmtDist(p.dist, lang), intro.extract)} ${s.outro(name)}`;
     els.dText.textContent = narration;
     els.speak.disabled = !hasSpeech;
+    if (intro.translatedFrom) { els.note.textContent = s.note(intro.translatedFrom); els.note.hidden = false; }
     if (intro.url) { els.src.href = intro.url; els.src.hidden = false; }
-  } catch {
-    if (my === detailId) els.dText.textContent = s.introFail;
+  } catch (e) {
+    if (my === detailId) els.dText.textContent = e instanceof QuotaError ? s.quotaFail : s.introFail;
   }
 }
 
@@ -144,6 +174,7 @@ function applyLang() {
   els.nav.textContent = s.navigate;
   els.src.textContent = s.source;
   els.credits.textContent = s.credits;
+  els.speedLabel.textContent = s.speed;
   els.status.textContent = statusFn();
   renderList();
   if (selected) void showDetail(selected);
@@ -161,6 +192,9 @@ els.radius.addEventListener('input', () => { els.radiusOut.textContent = els.rad
 els.find.addEventListener('click', () => void onFind());
 els.speak.addEventListener('click', speak);
 els.stop.addEventListener('click', stopSpeak);
-els.speak.hidden = els.stop.hidden = !hasSpeech;
+els.slower.addEventListener('click', () => changeSpeed(-1));
+els.faster.addEventListener('click', () => changeSpeed(1));
+els.speak.hidden = els.stop.hidden = els.speedBox.hidden = !hasSpeech;
+updateSpeedUi();
 statusFn = () => t().hint;
 applyLang();

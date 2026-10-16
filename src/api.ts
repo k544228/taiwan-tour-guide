@@ -10,7 +10,7 @@ export interface Place {
   wiki?: { lang: string; title: string };
   wikidata?: string;
 }
-export interface Intro { extract: string; url: string }
+export interface Intro { extract: string; url: string; translatedFrom: 'zh' | 'en' | null }
 
 type Tags = Record<string, string | undefined>;
 interface OsmEl { type: string; id: number; lat?: number; lon?: number; center?: { lat: number; lon: number }; tags?: Tags }
@@ -112,29 +112,142 @@ export async function searchPlaces(lat: number, lon: number, r: number): Promise
   }
 }
 
-async function sitelinkTitle(qid: string, site: 'zhwiki' | 'enwiki'): Promise<string | null> {
+export class QuotaError extends Error {}
+
+// Optional: put your email here to raise MyMemory's free daily quota from 5,000 to 50,000 characters.
+const MYMEMORY_EMAIL = '';
+type WikiLang = 'zh' | 'en';
+const LEN = { zh: { min: 200, max: 800 }, en: { min: 600, max: 1200 } };
+// Text that will be machine-translated is kept shorter to save translation quota.
+const SRC = { zh: { min: 200, max: 400 }, en: { min: 600, max: 800 } };
+const cache = new Map<string, Intro>();
+
+async function sitelinks(qid: string): Promise<{ zh?: string; en?: string }> {
   const u = new URL('https://www.wikidata.org/w/api.php');
-  u.search = new URLSearchParams({ action: 'wbgetentities', ids: qid, props: 'sitelinks', sitefilter: site, format: 'json', origin: '*' }).toString();
+  u.search = new URLSearchParams({ action: 'wbgetentities', ids: qid, props: 'sitelinks', sitefilter: 'zhwiki|enwiki', format: 'json', origin: '*' }).toString();
   const res = await fetch(u, { signal: AbortSignal.timeout(15000) });
-  if (!res.ok) return null;
+  if (!res.ok) return {};
   const j = (await res.json()) as { entities?: Record<string, { sitelinks?: Record<string, { title: string }> }> };
-  return j.entities?.[qid]?.sitelinks?.[site]?.title ?? null;
+  const s = j.entities?.[qid]?.sitelinks;
+  return { zh: s?.['zhwiki']?.title, en: s?.['enwiki']?.title };
 }
 
-/** Returns null when no matching Wikipedia article exists (never guesses by name). */
-export async function fetchIntro(p: Place, ui: Lang): Promise<Intro | null> {
-  const target = ui === 'en' ? 'en' : 'zh';
-  let title: string | null = null;
-  if (p.wiki?.lang === target) title = p.wiki.title;
-  else if (p.wikidata) title = await sitelinkTitle(p.wikidata, target === 'en' ? 'enwiki' : 'zhwiki');
-  if (!title) return null;
-  const res = await fetch(`https://${target}.wikipedia.org/api/rest_v1/page/summary/${encodeURIComponent(title.replace(/ /g, '_'))}`, {
-    headers: target === 'zh' ? { 'Accept-Language': ui } : {},
-    signal: AbortSignal.timeout(15000),
-  });
-  if (res.status === 404) return null;
+async function findTitles(p: Place): Promise<{ zh?: string; en?: string }> {
+  const t: { zh?: string; en?: string } = {};
+  if (p.wiki && (p.wiki.lang === 'zh' || p.wiki.lang === 'en')) t[p.wiki.lang] = p.wiki.title;
+  if (p.wikidata && !(t.zh && t.en)) {
+    const s = await sitelinks(p.wikidata);
+    t.zh = t.zh ?? s.zh;
+    t.en = t.en ?? s.en;
+  }
+  return t;
+}
+
+/** Drop section headings (lines without sentence-ending punctuation) and empty brackets. */
+function clean(s: string): string {
+  return s.split('\n').map((l) => l.trim()).filter((l) => /[。！？.!?」』”"）)]$/.test(l)).join(' ').replace(/[（(]\s*[）)]/g, '').trim();
+}
+
+async function extract(lang: WikiLang, title: string, intro: boolean, max: number): Promise<string> {
+  const u = new URL(`https://${lang}.wikipedia.org/w/api.php`);
+  const q: Record<string, string> = {
+    action: 'query', prop: 'extracts', explaintext: '1', exsectionformat: 'plain', exchars: String(max),
+    titles: title, redirects: '1', format: 'json', formatversion: '2', origin: '*',
+  };
+  if (intro) q['exintro'] = '1';
+  u.search = new URLSearchParams(q).toString();
+  const res = await fetch(u, { signal: AbortSignal.timeout(15000) });
   if (!res.ok) throw new Error('HTTP ' + res.status);
-  const j = (await res.json()) as { type?: string; extract?: string; content_urls?: { desktop?: { page?: string } } };
-  if (j.type === 'disambiguation' || !j.extract) return null;
-  return { extract: j.extract, url: j.content_urls?.desktop?.page ?? '' };
+  const j = (await res.json()) as { query?: { pages?: { extract?: string }[] } };
+  return clean(j.query?.pages?.[0]?.extract ?? '');
+}
+
+/** Intro section first; if shorter than `min`, fall back to the start of the full article. Cut at a full sentence. */
+async function longText(lang: WikiLang, title: string, min: number, max: number): Promise<string> {
+  let t = await extract(lang, title, true, max);
+  if (t.length < min) {
+    const full = await extract(lang, title, false, max);
+    if (full.length > t.length) t = full;
+  }
+  const m = t.match(/^[\s\S]*[。！？.!?]/);
+  return m ? m[0] : t;
+}
+
+/** Wikipedia's own Chinese text may be Traditional or Simplified, so always normalise to the UI script. */
+async function toUi(text: string, ui: Lang): Promise<string> {
+  if (ui === 'zh-TW') return (await import('opencc-js/cn2t')).Converter({ from: 'cn', to: 'twp' })(text);
+  if (ui === 'zh-CN') return (await import('opencc-js/t2cn')).Converter({ from: 'twp', to: 'cn' })(text);
+  return text;
+}
+
+/** MyMemory accepts at most 500 bytes per request, so split on sentence boundaries. */
+function chunkText(text: string, maxBytes: number): string[] {
+  const bytes = (s: string) => new TextEncoder().encode(s).length;
+  const out: string[] = [];
+  let cur = '';
+  const add = (s: string) => {
+    if (cur && bytes(cur + s) > maxBytes) { out.push(cur); cur = ''; }
+    cur += s;
+  };
+  for (const sent of text.match(/[^。！？.!?]+[。！？.!?]*\s*/g) ?? [text]) {
+    let rest = sent;
+    while (bytes(rest) > maxBytes) {
+      const n = Math.floor(maxBytes / 3);
+      add(rest.slice(0, n));
+      rest = rest.slice(n);
+    }
+    add(rest);
+  }
+  if (cur) out.push(cur);
+  return out;
+}
+
+const decode = (s: string) => new DOMParser().parseFromString(s, 'text/html').documentElement.textContent ?? s;
+
+async function translate(text: string, from: string, to: string): Promise<string> {
+  const out: string[] = [];
+  for (const q of chunkText(text, 450)) {
+    const params = new URLSearchParams({ q, langpair: `${from}|${to}` });
+    if (MYMEMORY_EMAIL) params.set('de', MYMEMORY_EMAIL);
+    const res = await fetch(`https://api.mymemory.translated.net/get?${params.toString()}`, { signal: AbortSignal.timeout(15000) });
+    if (res.status === 429) throw new QuotaError();
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    const j = (await res.json()) as { responseStatus?: number | string; quotaFinished?: boolean; responseData?: { translatedText?: string } };
+    const tt = j.responseData?.translatedText ?? '';
+    if (j.quotaFinished || Number(j.responseStatus) === 429 || /^MYMEMORY WARNING/i.test(tt)) throw new QuotaError();
+    if (Number(j.responseStatus) !== 200 || !tt) throw new Error('translate failed');
+    out.push(decode(tt));
+  }
+  return out.join(' ');
+}
+
+const wikiUrl = (lang: WikiLang, title: string) => `https://${lang}.wikipedia.org/wiki/${encodeURIComponent(title.replace(/ /g, '_'))}`;
+
+async function load(p: Place, ui: Lang): Promise<Intro | null> {
+  const target: WikiLang = ui === 'en' ? 'en' : 'zh';
+  const other: WikiLang = target === 'en' ? 'zh' : 'en';
+  const titles = await findTitles(p);
+  const own = titles[target];
+  if (own) {
+    const text = await longText(target, own, LEN[target].min, LEN[target].max);
+    if (text) return { extract: await toUi(text, ui), url: wikiUrl(target, own), translatedFrom: null };
+  }
+  // No article (or no text) in the UI language: translate the other language's real article instead of inventing content.
+  const src = titles[other];
+  if (!src) return null;
+  let text = await longText(other, src, SRC[other].min, SRC[other].max);
+  if (!text) return null;
+  if (other === 'zh') text = await toUi(text, 'zh-TW');
+  const translated = await translate(text, other === 'zh' ? 'zh-TW' : 'en', ui);
+  return { extract: await toUi(translated, ui), url: wikiUrl(other, src), translatedFrom: other };
+}
+
+/** Returns null only when neither the Chinese nor the English Wikipedia has a matching article. */
+export async function fetchIntro(p: Place, ui: Lang): Promise<Intro | null> {
+  const key = `${p.id}|${ui}`;
+  const hit = cache.get(key);
+  if (hit) return hit;
+  const r = await load(p, ui);
+  if (r) cache.set(key, r);
+  return r;
 }
