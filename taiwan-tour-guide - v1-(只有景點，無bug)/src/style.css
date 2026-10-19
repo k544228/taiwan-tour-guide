@@ -1,0 +1,19 @@
+:root { color-scheme: light dark; --accent: #0b6e4f; --line: #8884; }
+* { box-sizing: border-box; }
+body { margin: 0; font: 16px/1.7 system-ui, "Noto Sans TC", sans-serif; }
+main { max-width: 640px; margin: 0 auto; padding: 16px; }
+header { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
+h1 { font-size: 1.3rem; margin: 0; }
+select, button, .actions a { font: inherit; padding: 8px 12px; border: 1px solid var(--line); border-radius: 8px; background: transparent; color: inherit; cursor: pointer; text-decoration: none; }
+.controls { display: grid; gap: 12px; margin: 16px 0; }
+.controls input { width: 100%; }
+#find { background: var(--accent); color: #fff; border-color: var(--accent); padding: 14px; font-weight: 600; }
+button:disabled { opacity: .5; cursor: not-allowed; }
+#list { list-style: none; padding: 0; margin: 0; display: grid; gap: 8px; }
+#list button { width: 100%; text-align: left; display: flex; flex-direction: column; }
+.meta, small { color: #888; }
+#detail { margin-top: 20px; padding: 16px; border: 1px solid var(--line); border-radius: 12px; }
+#detail h2 { margin: 0; font-size: 1.2rem; }
+.actions { display: flex; flex-wrap: wrap; gap: 8px; }
+[hidden] { display: none !important; }
+footer { max-width: 640px; margin: 0 auto; padding: 16px; font-size: .8rem; color: #888; }

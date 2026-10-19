@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="zh-TW">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>台灣導遊小幫手</title>
+    <link rel="stylesheet" href="/src/style.css" />
+  </head>
+  <body>
+    <main>
+      <header>
+        <h1 id="title"></h1>
+        <select id="lang" aria-label="Language"></select>
+      </header>
+      <section class="controls">
+        <label>
+          <span id="radius-label"></span>: <output id="radius-out">3</output> km
+          <input id="radius" type="range" min="0.5" max="10" step="0.5" value="3" />
+        </label>
+        <button id="find" type="button"></button>
+      </section>
+      <p id="status" role="status"></p>
+      <ul id="list"></ul>
+      <section id="detail" hidden>
+        <h2 id="d-name"></h2>
+        <p id="d-meta" class="meta"></p>
+        <p id="d-text"></p>
+        <div class="actions">
+          <button id="speak" type="button"></button>
+          <button id="stop" type="button"></button>
+          <a id="nav" target="_blank" rel="noopener noreferrer"></a>
+          <a id="src" target="_blank" rel="noopener noreferrer" hidden></a>
+        </div>
+      </section>
+    </main>
+    <footer id="credits"></footer>
+    <script type="module" src="/src/main.ts"></script>
+  </body>
+</html>
